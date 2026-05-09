@@ -83,4 +83,13 @@ public class RedisGuardrailService {
 
 
     }
+
+    public void rollbackHorizontalCap(Long postId) {
+
+        String key =
+                "post:" + postId + ":bot_count";
+
+        redisTemplate.opsForValue()
+                .decrement(key);
+    }
 }

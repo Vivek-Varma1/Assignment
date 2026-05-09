@@ -6,7 +6,9 @@ import com.assignment.project.customExceptionHandler.ResourceNotFoundException;
 import com.assignment.project.model.Comment;
 import com.assignment.project.model.InteractionType;
 import com.assignment.project.model.Post;
+import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -22,17 +24,23 @@ public class PostService {
 
     @Autowired
     private    RedisGuardrailService guardrailService;
+
     @Autowired
     private  ViralityService viralityService;
+
+    @Autowired
+    private NotificationService notificationService;
+    @Autowired
+    private RedisTemplate<Object, Object> redisTemplate;
 
     public Post createPost(Post post) {
 
         post.setCreated_at(LocalDateTime.now());
 
         return postRepository.save(post);
-    }
-
+    }@Transactional
     public Comment addComment(Long postId, Comment comment) {
+
         Post post = postRepository.findById(postId)
                 .orElseThrow(() ->
                         new ResourceNotFoundException(
@@ -42,45 +50,76 @@ public class PostService {
                         )
                 );
 
-        if ("BOT".equals(comment.getAuthorType())) {
+        boolean botInteraction = false;
 
-            // 1. Horizontal Cap
+        try {
+
+            if ("BOT".equals(comment.getAuthorType())) {
+
+                botInteraction = true;
+
+                // 1. Horizontal Cap
+                guardrailService.checkHorizontalCap(postId);
+
+                // 2. Vertical Cap
+                Integer depth =
+                        comment.getDepth_level() == null
+                                ? 0
+                                : comment.getDepth_level();
+
+                guardrailService.checkVerticalCap(depth);
+
+                // 3. Cooldown Cap
+                guardrailService.checkCooldownCap(
+                        comment.getAuthorId(),
+                        comment.getHumanTargetId()
+                );
+            }
 
 
-            guardrailService.checkHorizontalCap(postId);
+            comment.setPost_id(postId);
 
-            // 2. Vertical Cap
-            Integer depth =
-                    comment.getDepth_level() == null
-                            ? 0
-                            : comment.getDepth_level();
-            guardrailService.checkVerticalCap(depth);
+            comment.setCreated_at(LocalDateTime.now());
+
+            Comment savedComment =
+                    commentRepository.save(comment);
+            if (botInteraction) {
+
+                viralityService.updateViralityScore(
+                        postId,
+                        InteractionType.BOT_REPLY
+                );
+
+                notificationService
+                        .handleBotInteractionNotification(
+                                post.getAuther_id(),
+                                "Bot replied to your post"
+                        );
+
+            } else {
+
+                viralityService.updateViralityScore(
+                        postId,
+                        InteractionType.HUMAN_COMMENT
+                );
+            }
+
+            return savedComment;
+
+        } catch (Exception e) {
 
         /*
-           Assume:
-           comment.authorId = botId
-           comment.humanTargetId = humanId
+            Rollback Redis bot counter
          */
+            if (botInteraction) {
 
-            // 3. Cooldown Cap
-            guardrailService.checkCooldownCap(
-                    comment.getAuthorId(),
-                    comment.getHumanTargetId()
-            );
+                guardrailService.rollbackHorizontalCap(
+                        postId
+                );
+            }
 
+            throw e;
         }
-
-        comment.setPost_id(postId);
-        comment.setCreated_at(LocalDateTime.now());
-        Comment savedComment=commentRepository.save(comment);
-        if("BOT".equals(comment.getAuthorType())){
-            viralityService.updateViralityScore(postId,
-                    InteractionType.BOT_REPLY);
-        }
-        else {
-            viralityService.updateViralityScore(postId,InteractionType.HUMAN_COMMENT);
-        }
-        return savedComment;
     }
 
     public void likePost(Long postId) {
@@ -92,4 +131,5 @@ public class PostService {
                 InteractionType.HUMAN_LIKE
         );
     }
+
 }
